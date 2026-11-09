@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       app:
-        description: "tv or mobile"
+        description: "tv, mobile, music (Orbit Music) or music-tv (Orbit Music + Apple TV)"
         required: true
         default: tv
 
@@ -31,9 +31,12 @@ jobs:
         id: app
         run: |
           case "${{ inputs.app }}" in
-            mobile) echo "ref=orbit-mobile" >> "$GITHUB_OUTPUT"; echo "ipa=OrbitMobile.ipa" >> "$GITHUB_OUTPUT"; echo "kind=mobile" >> "$GITHUB_OUTPUT" ;;
-            *)      echo "ref=detail-apple-style" >> "$GITHUB_OUTPUT"; echo "ipa=Orbit.ipa" >> "$GITHUB_OUTPUT"; echo "kind=tv" >> "$GITHUB_OUTPUT" ;;
+            mobile)   o="ref=orbit-mobile kind=mobile java=17" ;;
+            music)    o="ref=orbit-music kind=music java=21" ;;
+            music-tv) o="ref=orbit-music kind=music-tv java=21" ;;
+            *)        o="ref=detail-apple-style kind=tv java=17" ;;
           esac
+          for kv in $o; do echo "$kv" >> "$GITHUB_OUTPUT"; done
 
       - name: Get the sources
         uses: actions/checkout@v4
@@ -47,7 +50,7 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: ${{ steps.app.outputs.java }}
 
       - uses: actions/cache/restore@v4
         id: gradle-cache
@@ -56,7 +59,7 @@ jobs:
             ~/.gradle/caches
             ~/.gradle/wrapper
             ~/.konan
-          key: gradle-konan-${{ steps.app.outputs.kind }}-${{ hashFiles('src/gradle/libs.versions.toml', 'src/gradle/wrapper/gradle-wrapper.properties') }}
+          key: gradle-konan-${{ steps.app.outputs.kind }}-${{ hashFiles('src/gradle/libs.versions.toml', 'src/gradle/wrapper/gradle-wrapper.properties', 'src/OrbitMusic/core/build.gradle.kts', 'src/OrbitMusic/core/gradle/wrapper/gradle-wrapper.properties') }}
           restore-keys: |
             gradle-konan-${{ steps.app.outputs.kind }}-
             gradle-konan-
@@ -68,6 +71,7 @@ jobs:
 
       # The patched quickjs-kt the shared module needs (public scaffolding).
       - uses: actions/checkout@v4
+        if: ${{ !startsWith(steps.app.outputs.kind, 'music') }}
         with:
           repository: youngchris29-art/NuvioTV
           ref: 6265f00ec0b19b8a1301488f2ede523c8768de84
@@ -77,17 +81,19 @@ jobs:
 
       - uses: actions/cache/restore@v4
         id: quickjs-cache
+        if: ${{ !startsWith(steps.app.outputs.kind, 'music') }}
         with:
           path: ~/.m2/repository/io/github/dokar3
           key: quickjs-tvos-${{ hashFiles('outer-scaffolding/scaffolding/quickjs-kt-tvos.patch', 'outer-scaffolding/scaffolding/build-quickjs-tvos.sh') }}
 
       - name: quickjs-kt 1.0.5-tvos
+        if: ${{ !startsWith(steps.app.outputs.kind, 'music') }}
         run: |
           if [ -d "$HOME/.m2/repository/io/github/dokar3/quickjs-kt/1.0.5-tvos" ]; then exit 0; fi
           bash outer-scaffolding/scaffolding/build-quickjs-tvos.sh "$HOME/quickjs-kt-tvos" > quickjs.log 2>&1 || { tail -5 quickjs.log; exit 1; }
 
       - name: Save quickjs cache
-        if: always() && steps.quickjs-cache.outputs.cache-hit != 'true'
+        if: always() && !startsWith(steps.app.outputs.kind, 'music') && steps.quickjs-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: ~/.m2/repository/io/github/dokar3
@@ -99,7 +105,11 @@ jobs:
         working-directory: src
         run: |
           status=0
-          bash scripts/ci-build.sh "${{ steps.app.outputs.kind }}" > ../build.log 2>&1 || status=$?
+          case "${{ steps.app.outputs.kind }}" in
+            music)    bash scripts/ci-build-music.sh > ../build.log 2>&1 || status=$? ;;
+            music-tv) bash scripts/ci-build-music.sh tv > ../build.log 2>&1 || status=$? ;;
+            *)        bash scripts/ci-build.sh "${{ steps.app.outputs.kind }}" > ../build.log 2>&1 || status=$? ;;
+          esac
           echo "status=$status" >> "$GITHUB_OUTPUT"
           echo "::notice::build exit $status"
 
@@ -121,10 +131,12 @@ jobs:
         run: |
           set -e
           TAG="${{ steps.app.outputs.kind }}-latest"
+          [ "$TAG" = "music-tv-latest" ] && TAG="music-latest"
           mkdir -p pub
           [ -f build.log ] && openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -in build.log -out pub/build.log.enc -pass env:IPA_PASSWORD
-          IPA="src/out/${{ steps.app.outputs.ipa }}"
-          [ -f "$IPA" ] && openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -in "$IPA" -out "pub/${{ steps.app.outputs.ipa }}.enc" -pass env:IPA_PASSWORD
+          for IPA in src/out/*.ipa; do
+            [ -f "$IPA" ] && openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -in "$IPA" -out "pub/$(basename "$IPA").enc" -pass env:IPA_PASSWORD
+          done
           rm -rf src/out build.log
           gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag 2>/dev/null || true
           gh release create "$TAG" pub/* --repo "$GITHUB_REPOSITORY" --prerelease \
