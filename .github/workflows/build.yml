@@ -1,0 +1,132 @@
+name: Build
+
+# Builds an app from the private repo on a GitHub Mac (free here, this repo being public).
+# Nothing of the private repo is shown: the build's output goes to an encrypted log, and the app is published
+# encrypted (AES-256) — both opened only with the IPA_PASSWORD secret.
+on:
+  workflow_dispatch:
+    inputs:
+      app:
+        description: "tv or mobile"
+        required: true
+        default: tv
+
+concurrency:
+  group: build-${{ inputs.app }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+env:
+  GRADLE_OPTS: -Xmx4g -Dfile.encoding=UTF-8 -XX:MaxMetaspaceSize=1g
+  KOTLIN_DAEMON_JVMARGS: -Xmx3g
+
+jobs:
+  build:
+    runs-on: xcode-27
+    timeout-minutes: 150
+    steps:
+      - name: Choose
+        id: app
+        run: |
+          case "${{ inputs.app }}" in
+            mobile) echo "ref=orbit-mobile" >> "$GITHUB_OUTPUT"; echo "ipa=OrbitMobile.ipa" >> "$GITHUB_OUTPUT"; echo "kind=mobile" >> "$GITHUB_OUTPUT" ;;
+            *)      echo "ref=detail-apple-style" >> "$GITHUB_OUTPUT"; echo "ipa=Orbit.ipa" >> "$GITHUB_OUTPUT"; echo "kind=tv" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Get the sources
+        uses: actions/checkout@v4
+        with:
+          repository: mrStevenx3/Orbit
+          ref: ${{ steps.app.outputs.ref }}
+          token: ${{ secrets.ORBIT_TOKEN }}
+          path: src
+          show-progress: false
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: actions/cache/restore@v4
+        id: gradle-cache
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            ~/.konan
+          key: gradle-konan-${{ steps.app.outputs.kind }}-${{ hashFiles('src/gradle/libs.versions.toml', 'src/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-konan-${{ steps.app.outputs.kind }}-
+            gradle-konan-
+
+      - name: Select newest Xcode
+        run: |
+          NEWEST="$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)"
+          if [ -n "$NEWEST" ]; then sudo xcode-select -s "$NEWEST/Contents/Developer"; fi
+
+      # The patched quickjs-kt the shared module needs (public scaffolding).
+      - uses: actions/checkout@v4
+        with:
+          repository: youngchris29-art/NuvioTV
+          ref: 6265f00ec0b19b8a1301488f2ede523c8768de84
+          path: outer-scaffolding
+          sparse-checkout: scaffolding
+          show-progress: false
+
+      - uses: actions/cache/restore@v4
+        id: quickjs-cache
+        with:
+          path: ~/.m2/repository/io/github/dokar3
+          key: quickjs-tvos-${{ hashFiles('outer-scaffolding/scaffolding/quickjs-kt-tvos.patch', 'outer-scaffolding/scaffolding/build-quickjs-tvos.sh') }}
+
+      - name: quickjs-kt 1.0.5-tvos
+        run: |
+          if [ -d "$HOME/.m2/repository/io/github/dokar3/quickjs-kt/1.0.5-tvos" ]; then exit 0; fi
+          bash outer-scaffolding/scaffolding/build-quickjs-tvos.sh "$HOME/quickjs-kt-tvos" > quickjs.log 2>&1 || { tail -5 quickjs.log; exit 1; }
+
+      - name: Save quickjs cache
+        if: always() && steps.quickjs-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.m2/repository/io/github/dokar3
+          key: ${{ steps.quickjs-cache.outputs.cache-primary-key }}
+
+      # The build itself: every line of its output into the log, encrypted below.
+      - name: Build
+        id: build
+        working-directory: src
+        run: |
+          status=0
+          bash scripts/ci-build.sh "${{ steps.app.outputs.kind }}" > ../build.log 2>&1 || status=$?
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          echo "::notice::build exit $status"
+
+      - name: Save Gradle cache
+        if: always() && steps.gradle-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            ~/.konan
+          key: ${{ steps.gradle-cache.outputs.cache-primary-key }}
+
+      - name: Encrypt and publish
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IPA_PASSWORD: ${{ secrets.IPA_PASSWORD }}
+        run: |
+          set -e
+          TAG="${{ steps.app.outputs.kind }}-latest"
+          mkdir -p pub
+          [ -f build.log ] && openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -in build.log -out pub/build.log.enc -pass env:IPA_PASSWORD
+          IPA="src/out/${{ steps.app.outputs.ipa }}"
+          [ -f "$IPA" ] && openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -in "$IPA" -out "pub/${{ steps.app.outputs.ipa }}.enc" -pass env:IPA_PASSWORD
+          rm -rf src/out build.log
+          gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "$TAG" pub/* --repo "$GITHUB_REPOSITORY" --prerelease \
+            --title "$TAG (exit ${{ steps.build.outputs.status }})" --notes "Run $GITHUB_RUN_ID."
+          [ "${{ steps.build.outputs.status }}" = "0" ]
