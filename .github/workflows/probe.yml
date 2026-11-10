@@ -1,0 +1,13 @@
+name: probe
+on: workflow_dispatch
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          for p in disney paramount-plus; do
+            echo "== jina $p"
+            curl -s -m 60 "https://r.jina.ai/https://flixpatrol.com/top10/$p/france/" | head -c 6000; echo
+          done
+          echo "== jina html disney"
+          curl -s -m 60 -H "X-Return-Format: html" "https://r.jina.ai/https://flixpatrol.com/top10/disney/france/" | grep -o 'TOP 10 [A-Za-z ]*\|href="/title/[a-z0-9-]*/"' | head -60
