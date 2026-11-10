@@ -5,13 +5,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: |
-          mkdir out
           UA="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15"
-          for p in netflix disney amazon-prime hbo-max hbo apple-tv paramount-plus; do
-            code=$(curl -sL -A "$UA" -o out/$p.html -w "%{http_code}" https://flixpatrol.com/top10/$p/france/)
-            echo "$p $code $(wc -c < out/$p.html)"
+          echo "== netflix tsv france latest"
+          curl -sL https://www.netflix.com/tudum/top10/data/all-weeks-countries.tsv | awk -F'\t' 'NR==1{print} $1=="France"' | sort -t$'\t' -k3,3r | head -22
+          echo "== top10.netflix.com france"
+          curl -sL -A "$UA" -o t.html -w "%{http_code}\n" https://top10.netflix.com/france ; wc -c t.html
+          for pkg in nfx dnp prv amp mxx hbm atp pmp; do
+          echo "== justwatch $pkg"
+          curl -s https://apis.justwatch.com/graphql -H 'content-type: application/json' -A "$UA" -d '{"query":"query($p:[String!]){popularTitles(country:FR,first:10,sortBy:POPULAR,filter:{packages:$p,objectTypes:[MOVIE]}){edges{node{objectType content(country:FR,language:\"fr\"){title externalIds{imdbId tmdbId}}}}}}","variables":{"p":["'$pkg'"]}}' | head -c 1500; echo
           done
-          curl -sL -A "$UA" -o out/netflix-official.tsv -w "netflix-tsv %{http_code}\n" https://www.netflix.com/tudum/top10/data/all-weeks-countries.tsv
-          wc -c out/*
-      - uses: actions/upload-artifact@v4
-        with: { name: probe, path: out }
+          echo "== streamingCharts dnp"
+          curl -s https://apis.justwatch.com/graphql -H 'content-type: application/json' -A "$UA" -d '{"query":"query{streamingCharts(country:FR,first:10,filter:{category:DAILY_POPULARITY_SAME_CONTENT_TYPE,objectType:MOVIE,packages:[\"dnp\"]}){edges{streamingChartInfo{rank} node{... on Movie{content(country:FR,language:\"fr\"){title externalIds{tmdbId}}}}}}}"}' | head -c 2500; echo
