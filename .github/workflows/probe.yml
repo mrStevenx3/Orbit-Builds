@@ -1,0 +1,17 @@
+name: probe
+on: workflow_dispatch
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          mkdir out
+          UA="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15"
+          for p in netflix disney amazon-prime hbo-max hbo apple-tv paramount-plus; do
+            code=$(curl -sL -A "$UA" -o out/$p.html -w "%{http_code}" https://flixpatrol.com/top10/$p/france/)
+            echo "$p $code $(wc -c < out/$p.html)"
+          done
+          curl -sL -A "$UA" -o out/netflix-official.tsv -w "netflix-tsv %{http_code}\n" https://www.netflix.com/tudum/top10/data/all-weeks-countries.tsv
+          wc -c out/*
+      - uses: actions/upload-artifact@v4
+        with: { name: probe, path: out }
